@@ -1,4 +1,3 @@
-
 const express = require('express');
 const { MongoClient } = require('mongodb');
 const cors = require('cors');
@@ -78,7 +77,7 @@ async function createMongoConnection(config) {
     options.tlsAllowInvalidCertificates = tlsConfig.insecure || false;
     options.tlsAllowInvalidHostnames = tlsConfig.insecure || false;
     
-    // ✅ CORREÇÃO: Usar certFiles ao invés de tlsConfig
+    // ✅ CORREÇÃO DEFINITIVA: Usar os caminhos corretos dos certificados
     if (tlsConfig.caFile) {
       console.log('📜 Aplicando certificado CA:', tlsConfig.caFile);
       options.tlsCAFile = tlsConfig.caFile;
@@ -144,13 +143,13 @@ app.post('/connect', async (req, res) => {
       console.log('📁 Certificados salvos:', certFiles);
     }
     
+    // ✅ CORREÇÃO DEFINITIVA: Passar certFiles para a função
     const config = {
       mongoUrl,
       database,
       tlsConfig: tlsConfig?.enabled ? {
         enabled: true,
         insecure: tlsConfig.insecure || false,
-        // ✅ CORREÇÃO: Usar certFiles ao invés de tlsConfig
         caFile: certFiles?.caFile,
         certFile: certFiles?.certFile
       } : { enabled: false }
