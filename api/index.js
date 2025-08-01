@@ -1,3 +1,4 @@
+
 const express = require('express');
 const { MongoClient } = require('mongodb');
 const cors = require('cors');
@@ -77,14 +78,26 @@ async function createMongoConnection(config) {
     options.tlsAllowInvalidCertificates = tlsConfig.insecure || false;
     options.tlsAllowInvalidHostnames = tlsConfig.insecure || false;
     
+    // ✅ CORREÇÃO: Usar certFiles ao invés de tlsConfig
     if (tlsConfig.caFile) {
+      console.log('📜 Aplicando certificado CA:', tlsConfig.caFile);
       options.tlsCAFile = tlsConfig.caFile;
     }
     if (tlsConfig.certFile) {
+      console.log('🔑 Aplicando certificado cliente:', tlsConfig.certFile);
       options.tlsCertificateKeyFile = tlsConfig.certFile;
     }
+    
+    console.log('🔒 Configurações TLS aplicadas:', {
+      tls: options.tls,
+      tlsAllowInvalidCertificates: options.tlsAllowInvalidCertificates,
+      tlsAllowInvalidHostnames: options.tlsAllowInvalidHostnames,
+      hasCaFile: !!options.tlsCAFile,
+      hasCertFile: !!options.tlsCertificateKeyFile
+    });
   }
 
+  console.log('🔌 Tentando conectar com MongoDB...');
   const client = new MongoClient(mongoUrl, options);
   await client.connect();
   console.log('✅ MongoDB conectado com sucesso!');
@@ -115,16 +128,20 @@ app.post('/connect', async (req, res) => {
       
       if (tlsConfig.caCert) {
         const caFile = path.join(tempDir, `ca_${connectionId}.pem`);
+        console.log('💾 Salvando certificado CA em:', caFile);
         fs.writeFileSync(caFile, tlsConfig.caCert);
         certFiles = { caFile };
       }
       
       if (tlsConfig.clientCert) {
         const certFile = path.join(tempDir, `cert_${connectionId}.pem`);
+        console.log('💾 Salvando certificado cliente em:', certFile);
         fs.writeFileSync(certFile, tlsConfig.clientCert);
         if (!certFiles) certFiles = {};
         certFiles.certFile = certFile;
       }
+      
+      console.log('📁 Certificados salvos:', certFiles);
     }
     
     const config = {
@@ -133,10 +150,18 @@ app.post('/connect', async (req, res) => {
       tlsConfig: tlsConfig?.enabled ? {
         enabled: true,
         insecure: tlsConfig.insecure || false,
+        // ✅ CORREÇÃO: Usar certFiles ao invés de tlsConfig
         caFile: certFiles?.caFile,
         certFile: certFiles?.certFile
       } : { enabled: false }
     };
+    
+    console.log('⚙️ Configuração final:', {
+      database: config.database,
+      tlsEnabled: config.tlsConfig.enabled,
+      hasCaFile: !!config.tlsConfig.caFile,
+      hasCertFile: !!config.tlsConfig.certFile
+    });
     
     const connection = await createMongoConnection(config);
     activeConnections.set(connectionId, {
@@ -147,6 +172,7 @@ app.post('/connect', async (req, res) => {
     });
     
     // Testar conexão
+    console.log('🏓 Testando conexão com ping...');
     await connection.db.admin().ping();
     console.log('🎯 Ping bem-sucedido');
     
@@ -159,6 +185,7 @@ app.post('/connect', async (req, res) => {
     
   } catch (error) {
     console.error('❌ Erro na conexão:', error);
+    console.error('Stack trace:', error.stack);
     res.status(500).json({
       success: false,
       error: 'Falha na conexão TLS',
