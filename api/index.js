@@ -1,5 +1,5 @@
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -19,6 +19,26 @@ const activeConnections = new Map();
 
 console.log('🚀 MongoDB TLS Proxy Service iniciado');
 
+// Função para converter strings para ObjectId quando necessário
+function parseQuery(query) {
+  const parsed = { ...query };
+  
+  // Converter campos que podem ser ObjectIds
+  ['_id', 'franchise', 'franchiseId'].forEach(field => {
+    if (parsed[field] && typeof parsed[field] === 'string' && parsed[field].length === 24) {
+      try {
+        console.log(`🔄 Converting ${field} from string to ObjectId:`, parsed[field]);
+        parsed[field] = new ObjectId(parsed[field]);
+        console.log(`✅ Converted ${field} to ObjectId:`, parsed[field]);
+      } catch (err) {
+        console.log(`⚠️ Failed to convert ${field} to ObjectId, keeping as string`);
+      }
+    }
+  });
+  
+  return parsed;
+}
+
 // Root endpoint
 app.get('/', (req, res) => {
   console.log('🏠 Root endpoint acessado em:', new Date().toISOString());
@@ -32,7 +52,9 @@ app.get('/', (req, res) => {
       'Complex Aggregation Pipelines',
       'Multiple Parameter Types',
       'Enhanced Error Handling',
-      'Detailed Logging'
+      'Detailed Logging',
+      'ObjectId Conversion',
+      'Debug Endpoints'
     ],
     endpoints: {
       health: '/health',
@@ -40,7 +62,8 @@ app.get('/', (req, res) => {
       connect: 'POST /connect',
       query: 'POST /query',
       collections: 'GET /collections/:connectionId',
-      disconnect: 'DELETE /disconnect/:connectionId'
+      disconnect: 'DELETE /disconnect/:connectionId',
+      debugStores: 'POST /debug-stores'
     }
   });
 });
@@ -127,7 +150,6 @@ function processQueryParameters(operation, params) {
       if (!pipeline && !query) {
         throw new Error('Pipeline ou query é obrigatório para operação aggregate');
       }
-      // Se pipeline não foi fornecido mas query foi, usar query como pipeline
       return { 
         pipeline: pipeline || query || [],
         options: options || {}
@@ -136,8 +158,9 @@ function processQueryParameters(operation, params) {
     case 'find':
     case 'findOne':
     case 'countDocuments':
+      const processedQuery = parseQuery(query || filter || {});
       return {
-        query: query || filter || {},
+        query: processedQuery,
         options: options || {}
       };
 
@@ -153,16 +176,16 @@ function processQueryParameters(operation, params) {
     case 'deleteOne':
     case 'deleteMany':
       return {
-        filter: filter || query || {},
+        filter: parseQuery(filter || query || {}),
         document: document,
         options: options || {}
       };
 
     default:
       return {
-        query: query || {},
+        query: parseQuery(query || {}),
         pipeline: pipeline,
-        filter: filter,
+        filter: parseQuery(filter || {}),
         document: document,
         options: options || {}
       };
@@ -258,7 +281,7 @@ app.post('/connect', async (req, res) => {
   }
 });
 
-// POST /query - VERSÃO MELHORADA
+// POST /query - VERSÃO MELHORADA COM LOGS DETALHADOS
 app.post('/query', async (req, res) => {
   console.log('🔍 Solicitação de query recebida');
   const startTime = Date.now();
@@ -266,6 +289,12 @@ app.post('/query', async (req, res) => {
   try {
     const { connectionId, collection, operation, query, pipeline, filter, document, options } = req.body;
     
+    console.log('🔍 ===== PROXY QUERY DEBUG =====');
+    console.log('📋 Full Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('🆔 ConnectionId:', connectionId);
+    console.log('📊 Collection:', collection);
+    console.log('⚡ Operation:', operation);
+    console.log('🔍 Raw Query:', JSON.stringify(query, null, 2));
     console.log('📊 Query params:', { 
       connectionId, 
       collection, 
@@ -287,11 +316,14 @@ app.post('/query', async (req, res) => {
     
     const connection = activeConnections.get(connectionId);
     if (!connection) {
+      console.error('❌ Connection not found:', connectionId);
       return res.status(404).json({
         success: false,
         error: 'Conexão não encontrada'
       });
     }
+
+    console.log('✅ Connection found, executing operation...');
     
     const coll = connection.db.collection(collection);
     let result;
@@ -308,7 +340,8 @@ app.post('/query', async (req, res) => {
     console.log('⚙️ Parâmetros processados:', {
       operation,
       processedKeys: Object.keys(processedParams),
-      pipelineLength: processedParams.pipeline ? processedParams.pipeline.length : 0
+      pipelineLength: processedParams.pipeline ? processedParams.pipeline.length : 0,
+      processedQuery: JSON.stringify(processedParams.query, null, 2)
     });
     
     // Executar operação baseada no tipo
@@ -316,11 +349,25 @@ app.post('/query', async (req, res) => {
       case 'find':
         console.log('🔍 Executando find com query:', JSON.stringify(processedParams.query));
         result = await coll.find(processedParams.query, processedParams.options).toArray();
+        console.log('📊 Find result count:', result.length);
+        
+        // Log first few results for debugging
+        if (result.length > 0) {
+          console.log('📋 First 2 results:', JSON.stringify(result.slice(0, 2), null, 2));
+        } else {
+          console.log('⚠️ Zero results found, testing with empty query...');
+          const testResult = await coll.find({}).limit(3).toArray();
+          console.log('📋 Test query (empty) returned:', testResult.length, 'documents');
+          if (testResult.length > 0) {
+            console.log('📋 Sample documents:', JSON.stringify(testResult, null, 2));
+          }
+        }
         break;
         
       case 'findOne':
         console.log('🔍 Executando findOne com query:', JSON.stringify(processedParams.query));
         result = await coll.findOne(processedParams.query, processedParams.options);
+        console.log('📊 FindOne result:', result ? 'Found document' : 'No document found');
         break;
         
       case 'aggregate':
@@ -329,11 +376,13 @@ app.post('/query', async (req, res) => {
           throw new Error('Pipeline deve ser um array para operação aggregate');
         }
         result = await coll.aggregate(processedParams.pipeline, processedParams.options).toArray();
+        console.log('📊 Aggregate result count:', result.length);
         break;
         
       case 'countDocuments':
         console.log('🔢 Executando countDocuments com query:', JSON.stringify(processedParams.query));
         result = await coll.countDocuments(processedParams.query, processedParams.options);
+        console.log('📊 Count result:', result);
         break;
         
       case 'insertOne':
@@ -367,6 +416,7 @@ app.post('/query', async (req, res) => {
         break;
         
       default:
+        console.error('❌ Unsupported operation:', operation);
         throw new Error(`Operação não suportada: ${operation}`);
     }
     
@@ -395,8 +445,8 @@ app.post('/query', async (req, res) => {
     
   } catch (error) {
     const executionTime = Date.now() - startTime;
-    console.error('❌ Erro na query:', error);
-    console.error('🔍 Stack trace:', error.stack);
+    console.error('💥 PROXY ERROR:', error);
+    console.error('💥 Error stack:', error.stack);
     console.error('📊 Request body:', JSON.stringify(req.body, null, 2));
     
     res.status(500).json({
@@ -412,6 +462,66 @@ app.post('/query', async (req, res) => {
         errorStack: error.stack
       }
     });
+  }
+});
+
+// POST /debug-stores - ENDPOINT PARA DEBUG ESPECÍFICO
+app.post('/debug-stores', async (req, res) => {
+  try {
+    const { connectionId, franchiseId } = req.body;
+    
+    const connection = activeConnections.get(connectionId);
+    if (!connection) {
+      return res.status(404).json({ success: false, error: 'Connection not found' });
+    }
+
+    console.log('🔍 ===== DEBUG STORES SEARCH =====');
+    console.log('🆔 Franchise ID to search:', franchiseId);
+
+    // Teste 1: Contar total de documentos
+    const totalCount = await connection.db.collection('stores').countDocuments({});
+    console.log('📊 Total stores in collection:', totalCount);
+
+    // Teste 2: Buscar primeiros 5 documentos para ver estrutura
+    const sampleStores = await connection.db.collection('stores').find({}).limit(5).toArray();
+    console.log('📋 Sample stores structure:', JSON.stringify(sampleStores, null, 2));
+
+    // Teste 3: Buscar com franchise como string
+    const stringQuery = { franchise: franchiseId };
+    const stringResult = await connection.db.collection('stores').find(stringQuery).limit(5).toArray();
+    console.log('🔍 String query result count:', stringResult.length);
+
+    // Teste 4: Buscar com franchise como ObjectId
+    const objectIdQuery = { franchise: new ObjectId(franchiseId) };
+    const objectIdResult = await connection.db.collection('stores').find(objectIdQuery).limit(5).toArray();
+    console.log('🔍 ObjectId query result count:', objectIdResult.length);
+
+    // Teste 5: Buscar com franchiseId como string
+    const franchiseIdStringQuery = { franchiseId: franchiseId };
+    const franchiseIdStringResult = await connection.db.collection('stores').find(franchiseIdStringQuery).limit(5).toArray();
+    console.log('🔍 FranchiseId string query result count:', franchiseIdStringResult.length);
+
+    // Teste 6: Buscar com franchiseId como ObjectId
+    const franchiseIdObjectQuery = { franchiseId: new ObjectId(franchiseId) };
+    const franchiseIdObjectResult = await connection.db.collection('stores').find(franchiseIdObjectQuery).limit(5).toArray();
+    console.log('🔍 FranchiseId ObjectId query result count:', franchiseIdObjectResult.length);
+
+    res.json({
+      success: true,
+      debug: {
+        totalCount,
+        sampleStores: sampleStores.length,
+        stringQueryCount: stringResult.length,
+        objectIdQueryCount: objectIdResult.length,
+        franchiseIdStringCount: franchiseIdStringResult.length,
+        franchiseIdObjectCount: franchiseIdObjectResult.length,
+        firstSample: sampleStores[0] || null
+      }
+    });
+
+  } catch (error) {
+    console.error('💥 Debug error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
