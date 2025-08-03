@@ -19,15 +19,21 @@ const activeConnections = new Map();
 
 console.log('🚀 MongoDB TLS Proxy Service iniciado');
 
-// Root endpoint - FUNDAMENTAL para evitar 404
+// Root endpoint
 app.get('/', (req, res) => {
   console.log('🏠 Root endpoint acessado em:', new Date().toISOString());
   res.status(200).json({
     success: true,
     service: 'MongoDB TLS Proxy',
-    version: '1.0.0',
+    version: '2.0.0',
     status: 'running',
     timestamp: new Date().toISOString(),
+    features: [
+      'Complex Aggregation Pipelines',
+      'Multiple Parameter Types',
+      'Enhanced Error Handling',
+      'Detailed Logging'
+    ],
     endpoints: {
       health: '/health',
       status: '/status',
@@ -77,7 +83,6 @@ async function createMongoConnection(config) {
     options.tlsAllowInvalidCertificates = tlsConfig.insecure || false;
     options.tlsAllowInvalidHostnames = tlsConfig.insecure || false;
     
-    // ✅ CORREÇÃO DEFINITIVA: Usar os caminhos corretos dos certificados
     if (tlsConfig.caFile) {
       console.log('📜 Aplicando certificado CA:', tlsConfig.caFile);
       options.tlsCAFile = tlsConfig.caFile;
@@ -102,6 +107,66 @@ async function createMongoConnection(config) {
   console.log('✅ MongoDB conectado com sucesso!');
   
   return { client, db: client.db(database) };
+}
+
+// Função para validar e processar parâmetros de query
+function processQueryParameters(operation, params) {
+  const { query, pipeline, filter, document, options = {} } = params;
+  
+  console.log('🔍 Processando parâmetros:', { 
+    operation, 
+    hasQuery: !!query, 
+    hasPipeline: !!pipeline, 
+    hasFilter: !!filter, 
+    hasDocument: !!document,
+    optionsKeys: Object.keys(options)
+  });
+
+  switch (operation) {
+    case 'aggregate':
+      if (!pipeline && !query) {
+        throw new Error('Pipeline ou query é obrigatório para operação aggregate');
+      }
+      // Se pipeline não foi fornecido mas query foi, usar query como pipeline
+      return { 
+        pipeline: pipeline || query || [],
+        options: options || {}
+      };
+
+    case 'find':
+    case 'findOne':
+    case 'countDocuments':
+      return {
+        query: query || filter || {},
+        options: options || {}
+      };
+
+    case 'insertOne':
+    case 'insertMany':
+      return {
+        document: document || query,
+        options: options || {}
+      };
+
+    case 'updateOne':
+    case 'updateMany':
+    case 'deleteOne':
+    case 'deleteMany':
+      return {
+        filter: filter || query || {},
+        document: document,
+        options: options || {}
+      };
+
+    default:
+      return {
+        query: query || {},
+        pipeline: pipeline,
+        filter: filter,
+        document: document,
+        options: options || {}
+      };
+  }
 }
 
 // POST /connect
@@ -143,7 +208,6 @@ app.post('/connect', async (req, res) => {
       console.log('📁 Certificados salvos:', certFiles);
     }
     
-    // ✅ CORREÇÃO DEFINITIVA: Passar certFiles para a função
     const config = {
       mongoUrl,
       database,
@@ -194,14 +258,32 @@ app.post('/connect', async (req, res) => {
   }
 });
 
-// POST /query
+// POST /query - VERSÃO MELHORADA
 app.post('/query', async (req, res) => {
   console.log('🔍 Solicitação de query recebida');
+  const startTime = Date.now();
   
   try {
-    const { connectionId, collection, operation, query, options } = req.body;
+    const { connectionId, collection, operation, query, pipeline, filter, document, options } = req.body;
     
-    console.log('Query params:', { connectionId, collection, operation });
+    console.log('📊 Query params:', { 
+      connectionId, 
+      collection, 
+      operation,
+      hasQuery: !!query,
+      hasPipeline: !!pipeline,
+      hasFilter: !!filter,
+      hasDocument: !!document,
+      queryType: typeof query,
+      pipelineLength: Array.isArray(pipeline) ? pipeline.length : 'not-array'
+    });
+    
+    if (!connectionId || !collection || !operation) {
+      return res.status(400).json({
+        success: false,
+        error: 'connectionId, collection e operation são obrigatórios'
+      });
+    }
     
     const connection = activeConnections.get(connectionId);
     if (!connection) {
@@ -214,38 +296,121 @@ app.post('/query', async (req, res) => {
     const coll = connection.db.collection(collection);
     let result;
     
+    // Processar parâmetros baseado na operação
+    const processedParams = processQueryParameters(operation, {
+      query,
+      pipeline,
+      filter,
+      document,
+      options
+    });
+
+    console.log('⚙️ Parâmetros processados:', {
+      operation,
+      processedKeys: Object.keys(processedParams),
+      pipelineLength: processedParams.pipeline ? processedParams.pipeline.length : 0
+    });
+    
+    // Executar operação baseada no tipo
     switch (operation) {
       case 'find':
-        result = await coll.find(query || {}, options).toArray();
+        console.log('🔍 Executando find com query:', JSON.stringify(processedParams.query));
+        result = await coll.find(processedParams.query, processedParams.options).toArray();
         break;
+        
       case 'findOne':
-        result = await coll.findOne(query || {}, options);
+        console.log('🔍 Executando findOne com query:', JSON.stringify(processedParams.query));
+        result = await coll.findOne(processedParams.query, processedParams.options);
         break;
+        
       case 'aggregate':
-        result = await coll.aggregate(query, options).toArray();
+        console.log('📊 Executando aggregate com pipeline:', JSON.stringify(processedParams.pipeline, null, 2));
+        if (!Array.isArray(processedParams.pipeline)) {
+          throw new Error('Pipeline deve ser um array para operação aggregate');
+        }
+        result = await coll.aggregate(processedParams.pipeline, processedParams.options).toArray();
         break;
+        
       case 'countDocuments':
-        result = await coll.countDocuments(query || {}, options);
+        console.log('🔢 Executando countDocuments com query:', JSON.stringify(processedParams.query));
+        result = await coll.countDocuments(processedParams.query, processedParams.options);
         break;
+        
+      case 'insertOne':
+        console.log('📝 Executando insertOne');
+        result = await coll.insertOne(processedParams.document, processedParams.options);
+        break;
+        
+      case 'insertMany':
+        console.log('📝 Executando insertMany');
+        result = await coll.insertMany(processedParams.document, processedParams.options);
+        break;
+        
+      case 'updateOne':
+        console.log('✏️ Executando updateOne');
+        result = await coll.updateOne(processedParams.filter, processedParams.document, processedParams.options);
+        break;
+        
+      case 'updateMany':
+        console.log('✏️ Executando updateMany');
+        result = await coll.updateMany(processedParams.filter, processedParams.document, processedParams.options);
+        break;
+        
+      case 'deleteOne':
+        console.log('🗑️ Executando deleteOne');
+        result = await coll.deleteOne(processedParams.filter, processedParams.options);
+        break;
+        
+      case 'deleteMany':
+        console.log('🗑️ Executando deleteMany');
+        result = await coll.deleteMany(processedParams.filter, processedParams.options);
+        break;
+        
       default:
         throw new Error(`Operação não suportada: ${operation}`);
     }
     
-    console.log('✅ Query executada com sucesso');
+    const executionTime = Date.now() - startTime;
+    console.log(`✅ Query executada com sucesso em ${executionTime}ms`);
+    console.log('📈 Resultado:', {
+      type: typeof result,
+      isArray: Array.isArray(result),
+      length: Array.isArray(result) ? result.length : 'not-array',
+      hasData: !!result
+    });
     
     res.status(200).json({
       success: true,
       data: result,
-      timestamp: new Date().toISOString()
+      executionTime: executionTime,
+      timestamp: new Date().toISOString(),
+      diagnostics: {
+        operation,
+        collection,
+        parametersUsed: Object.keys(processedParams),
+        resultType: typeof result,
+        resultLength: Array.isArray(result) ? result.length : (result ? 1 : 0)
+      }
     });
     
   } catch (error) {
+    const executionTime = Date.now() - startTime;
     console.error('❌ Erro na query:', error);
+    console.error('🔍 Stack trace:', error.stack);
+    console.error('📊 Request body:', JSON.stringify(req.body, null, 2));
+    
     res.status(500).json({
       success: false,
       error: 'Falha na execução da query',
       details: error.message,
-      timestamp: new Date().toISOString()
+      executionTime: executionTime,
+      timestamp: new Date().toISOString(),
+      diagnostics: {
+        operation: req.body.operation,
+        collection: req.body.collection,
+        errorType: error.name,
+        errorStack: error.stack
+      }
     });
   }
 });
