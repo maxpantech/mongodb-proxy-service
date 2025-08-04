@@ -106,7 +106,7 @@ app.get('/status', (req, res) => {
   });
 });
 
-// ✅ NOVA: Função para criar pool de conexões MongoDB otimizado
+// ✅ CORRIGIDA: Função para criar pool de conexões MongoDB otimizado
 async function createMongoConnectionPool(config) {
   const { mongoUrl, database, tlsConfig } = config;
   
@@ -115,13 +115,13 @@ async function createMongoConnectionPool(config) {
     tlsEnabled: tlsConfig?.enabled 
   });
   
-  // ✅ Configurações otimizadas do pool de conexões
+  // ✅ Configurações CORRIGIDAS do pool de conexões
   const options = {
     // Pool de conexões otimizado
     maxPoolSize: 10,           // Máximo 10 conexões no pool
     minPoolSize: 2,            // Mínimo 2 conexões sempre ativas
     maxIdleTimeMS: 30000,      // 30s timeout para conexões ociosas
-    waitQueueMultiple: 5,      // Queue size multiplier
+    waitQueueMultiple: 5,      // ✅ CORRIGIDO: waitQueueMultiple (não waitqueuemultiple)
     waitQueueTimeoutMS: 10000, // 10s timeout na queue
     
     // Timeouts otimizados
@@ -156,6 +156,7 @@ async function createMongoConnectionPool(config) {
   console.log('🔌 Conectando ao MongoDB com pool...', {
     maxPoolSize: options.maxPoolSize,
     minPoolSize: options.minPoolSize,
+    waitQueueMultiple: options.waitQueueMultiple,
     socketTimeout: options.socketTimeoutMS
   });
 
@@ -332,6 +333,7 @@ app.post('/connect', async (req, res) => {
       poolInfo: {
         maxPoolSize: 10,
         minPoolSize: 2,
+        waitQueueMultiple: 5,
         socketTimeout: 45000
       },
       timestamp: new Date().toISOString()
