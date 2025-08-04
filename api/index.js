@@ -19,12 +19,37 @@ const activeConnections = new Map();
 
 console.log('🚀 MongoDB TLS Proxy Service iniciado');
 
-// Função para converter strings para ObjectId quando necessário
+// Função para converter strings para ObjectId e Date quando necessário
 function parseQuery(query) {
   const parsed = { ...query };
   
+  // Função recursiva para detectar e converter datas ISO para Date objects
+  function convertDates(obj) {
+    for (const key in obj) {
+      if (obj[key] && typeof obj[key] === 'object' && !Array.isArray(obj[key]) && !(obj[key] instanceof Date) && !(obj[key] instanceof ObjectId)) {
+        // Processar objetos aninhados ($gte, $lte, $in, etc.)
+        convertDates(obj[key]);
+      } else if (typeof obj[key] === 'string') {
+        // Detectar strings que parecem datas ISO (formato: YYYY-MM-DDTHH:mm:ss)
+        const isoDatePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$/;
+        if (isoDatePattern.test(obj[key])) {
+          try {
+            const dateObj = new Date(obj[key]);
+            // Verificar se é uma data válida
+            if (!isNaN(dateObj.getTime())) {
+              console.log(`🔄 Converting date string to Date object:`, obj[key], '→', dateObj);
+              obj[key] = dateObj;
+            }
+          } catch (err) {
+            console.log(`⚠️ Failed to convert ${obj[key]} to Date, keeping as string`);
+          }
+        }
+      }
+    }
+  }
+  
   // Converter campos que podem ser ObjectIds
-  ['_id', 'franchise', 'franchiseId'].forEach(field => {
+  ['_id', 'franchise', 'franchiseId', 'store', 'storeId'].forEach(field => {
     if (parsed[field] && typeof parsed[field] === 'string' && parsed[field].length === 24) {
       try {
         console.log(`🔄 Converting ${field} from string to ObjectId:`, parsed[field]);
@@ -35,6 +60,18 @@ function parseQuery(query) {
       }
     }
   });
+  
+  // Converter strings de data para Date objects
+  convertDates(parsed);
+  
+  console.log('📝 Query após processamento:', JSON.stringify(parsed, (key, value) => {
+    if (value instanceof Date) {
+      return `Date(${value.toISOString()})`;
+    } else if (value instanceof ObjectId) {
+      return `ObjectId(${value.toString()})`;
+    }
+    return value;
+  }, 2));
   
   return parsed;
 }
@@ -341,13 +378,24 @@ app.post('/query', async (req, res) => {
       operation,
       processedKeys: Object.keys(processedParams),
       pipelineLength: processedParams.pipeline ? processedParams.pipeline.length : 0,
-      processedQuery: JSON.stringify(processedParams.query, null, 2)
+      processedQuery: JSON.stringify(processedParams.query, (key, value) => {
+        if (value instanceof Date) {
+          return `Date(${value.toISOString()})`;
+        } else if (value instanceof ObjectId) {
+          return `ObjectId(${value.toString()})`;
+        }
+        return value;
+      }, 2)
     });
     
     // Executar operação baseada no tipo
     switch (operation) {
       case 'find':
-        console.log('🔍 Executando find com query:', JSON.stringify(processedParams.query));
+        console.log('🔍 Executando find com query:', JSON.stringify(processedParams.query, (key, value) => {
+          if (value instanceof Date) return `Date(${value.toISOString()})`;
+          if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
+          return value;
+        }));
         result = await coll.find(processedParams.query, processedParams.options).toArray();
         console.log('📊 Find result count:', result.length);
         
@@ -365,7 +413,11 @@ app.post('/query', async (req, res) => {
         break;
         
       case 'findOne':
-        console.log('🔍 Executando findOne com query:', JSON.stringify(processedParams.query));
+        console.log('🔍 Executando findOne com query:', JSON.stringify(processedParams.query, (key, value) => {
+          if (value instanceof Date) return `Date(${value.toISOString()})`;
+          if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
+          return value;
+        }));
         result = await coll.findOne(processedParams.query, processedParams.options);
         console.log('📊 FindOne result:', result ? 'Found document' : 'No document found');
         break;
@@ -380,7 +432,11 @@ app.post('/query', async (req, res) => {
         break;
         
       case 'countDocuments':
-        console.log('🔢 Executando countDocuments com query:', JSON.stringify(processedParams.query));
+        console.log('🔢 Executando countDocuments com query:', JSON.stringify(processedParams.query, (key, value) => {
+          if (value instanceof Date) return `Date(${value.toISOString()})`;
+          if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
+          return value;
+        }));
         result = await coll.countDocuments(processedParams.query, processedParams.options);
         console.log('📊 Count result:', result);
         break;
