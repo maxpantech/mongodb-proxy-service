@@ -14,10 +14,10 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 
-// Armazenar conexões ativas
-const activeConnections = new Map();
+// ✅ NOVO: Armazenar pools de conexão otimizados
+const connectionPools = new Map();
 
-console.log('🚀 MongoDB TLS Proxy Service iniciado');
+console.log('🚀 MongoDB TLS Proxy Service iniciado com Pool de Conexões');
 
 // Função para converter strings para ObjectId quando necessário
 function parseQuery(query) {
@@ -49,6 +49,9 @@ app.get('/', (req, res) => {
     status: 'running',
     timestamp: new Date().toISOString(),
     features: [
+      'connection-pooling',
+      'tls-support', 
+      'timeout-management',
       'Complex Aggregation Pipelines',
       'Multiple Parameter Types',
       'Enhanced Error Handling',
@@ -74,6 +77,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
     service: 'mongodb-tls-proxy',
+    activePools: connectionPools.size,
     timestamp: new Date().toISOString() 
   });
 });
@@ -81,24 +85,55 @@ app.get('/health', (req, res) => {
 // Status endpoint
 app.get('/status', (req, res) => {
   console.log('📊 Status endpoint acessado');
+  
+  const poolStats = [];
+  connectionPools.forEach((pool, connectionId) => {
+    poolStats.push({
+      connectionId,
+      totalConnections: pool.client.topology?.s?.servers?.size || 0,
+      isConnected: pool.client.topology?.isConnected() || false,
+      createdAt: pool.createdAt
+    });
+  });
+
   res.status(200).json({
     success: true,
-    activeConnections: activeConnections.size,
+    activePools: connectionPools.size,
+    poolStats,
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     timestamp: new Date().toISOString()
   });
 });
 
-// Função para criar conexão MongoDB com TLS
-async function createMongoConnection(config) {
+// ✅ NOVA: Função para criar pool de conexões MongoDB otimizado
+async function createMongoConnectionPool(config) {
   const { mongoUrl, database, tlsConfig } = config;
   
-  console.log('🔗 Criando conexão MongoDB TLS...', { database, tlsEnabled: tlsConfig?.enabled });
+  console.log('🔗 Criando POOL de conexões MongoDB TLS...', { 
+    database, 
+    tlsEnabled: tlsConfig?.enabled 
+  });
   
+  // ✅ Configurações otimizadas do pool de conexões
   const options = {
+    // Pool de conexões otimizado
+    maxPoolSize: 10,           // Máximo 10 conexões no pool
+    minPoolSize: 2,            // Mínimo 2 conexões sempre ativas
+    maxIdleTimeMS: 30000,      // 30s timeout para conexões ociosas
+    waitQueueMultiple: 5,      // Queue size multiplier
+    waitQueueTimeoutMS: 10000, // 10s timeout na queue
+    
+    // Timeouts otimizados
     connectTimeoutMS: 30000,
     serverSelectionTimeoutMS: 30000,
+    socketTimeoutMS: 45000,    // 45s para queries pesadas
+    heartbeatFrequencyMS: 10000,
+    
+    // Retry e reconexão
+    retryWrites: true,
+    retryReads: true,
+    maxStalenessSeconds: 90,
   };
 
   if (tlsConfig?.enabled) {
@@ -115,19 +150,21 @@ async function createMongoConnection(config) {
       options.tlsCertificateKeyFile = tlsConfig.certFile;
     }
     
-    console.log('🔒 Configurações TLS aplicadas:', {
-      tls: options.tls,
-      tlsAllowInvalidCertificates: options.tlsAllowInvalidCertificates,
-      tlsAllowInvalidHostnames: options.tlsAllowInvalidHostnames,
-      hasCaFile: !!options.tlsCAFile,
-      hasCertFile: !!options.tlsCertificateKeyFile
-    });
+    console.log('🔒 Configurações TLS aplicadas com pool otimizado');
   }
 
-  console.log('🔌 Tentando conectar com MongoDB...');
+  console.log('🔌 Conectando ao MongoDB com pool...', {
+    maxPoolSize: options.maxPoolSize,
+    minPoolSize: options.minPoolSize,
+    socketTimeout: options.socketTimeoutMS
+  });
+
   const client = new MongoClient(mongoUrl, options);
   await client.connect();
-  console.log('✅ MongoDB conectado com sucesso!');
+  
+  // ✅ Validar conectividade do pool
+  await client.db(database).admin().ping();
+  console.log('✅ Pool de conexões MongoDB estabelecido com sucesso!');
   
   return { client, db: client.db(database) };
 }
@@ -192,9 +229,9 @@ function processQueryParameters(operation, params) {
   }
 }
 
-// POST /connect
+// POST /connect - Agora com pool de conexões
 app.post('/connect', async (req, res) => {
-  console.log('📥 Solicitação de conexão recebida');
+  console.log('📥 Solicitação de conexão com pool recebida');
   
   try {
     const { connectionId, mongoUrl, database, tlsConfig } = req.body;
@@ -208,7 +245,28 @@ app.post('/connect', async (req, res) => {
       });
     }
 
-    // Escrever certificados se fornecidos
+    // ✅ Verificar se já existe pool ativo para este connectionId
+    if (connectionPools.has(connectionId)) {
+      const existingPool = connectionPools.get(connectionId);
+      
+      // Verificar se a conexão ainda está ativa
+      try {
+        await existingPool.db.admin().ping();
+        console.log('♻️ Reutilizando pool existente:', connectionId);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Pool de conexões reutilizado com sucesso',
+          connectionId,
+          timestamp: new Date().toISOString()
+        });
+      } catch (pingError) {
+        console.log('🔄 Pool existente inativo, recriando...', connectionId);
+        connectionPools.delete(connectionId);
+      }
+    }
+
+    // Processar certificados TLS se fornecidos
     let certFiles = null;
     if (tlsConfig?.enabled && (tlsConfig.caCert || tlsConfig.clientCert)) {
       const tempDir = '/tmp';
@@ -231,6 +289,7 @@ app.post('/connect', async (req, res) => {
       console.log('📁 Certificados salvos:', certFiles);
     }
     
+    // ✅ Criar configuração do pool
     const config = {
       mongoUrl,
       database,
@@ -242,48 +301,57 @@ app.post('/connect', async (req, res) => {
       } : { enabled: false }
     };
     
-    console.log('⚙️ Configuração final:', {
+    console.log('⚙️ Criando pool com configuração:', {
       database: config.database,
       tlsEnabled: config.tlsConfig.enabled,
       hasCaFile: !!config.tlsConfig.caFile,
       hasCertFile: !!config.tlsConfig.certFile
     });
     
-    const connection = await createMongoConnection(config);
-    activeConnections.set(connectionId, {
-      ...connection,
+    // ✅ Criar novo pool de conexões
+    const connectionPool = await createMongoConnectionPool(config);
+    
+    // ✅ Armazenar pool com metadados
+    connectionPools.set(connectionId, {
+      ...connectionPool,
       config,
       certFiles,
-      createdAt: new Date()
+      createdAt: new Date(),
+      lastUsed: new Date()
     });
     
-    // Testar conexão
-    console.log('🏓 Testando conexão com ping...');
-    await connection.db.admin().ping();
-    console.log('🎯 Ping bem-sucedido');
+    // Testar pool
+    console.log('🏓 Testando pool com ping...');
+    await connectionPool.db.admin().ping();
+    console.log('🎯 Pool funcionando corretamente');
     
     res.status(200).json({
       success: true,
-      message: 'Conexão TLS estabelecida com sucesso',
+      message: 'Pool de conexões TLS estabelecido com sucesso',
       connectionId,
+      poolInfo: {
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        socketTimeout: 45000
+      },
       timestamp: new Date().toISOString()
     });
     
   } catch (error) {
-    console.error('❌ Erro na conexão:', error);
+    console.error('❌ Erro ao criar pool de conexões:', error);
     console.error('Stack trace:', error.stack);
     res.status(500).json({
       success: false,
-      error: 'Falha na conexão TLS',
+      error: 'Falha ao criar pool de conexões TLS',
       details: error.message,
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// POST /query - VERSÃO MELHORADA COM LOGS DETALHADOS
+// ✅ POST /query - Agora otimizada com pool de conexões e logs detalhados
 app.post('/query', async (req, res) => {
-  console.log('🔍 Solicitação de query recebida');
+  console.log('🔍 Query recebida via pool de conexões');
   const startTime = Date.now();
   
   try {
@@ -314,18 +382,21 @@ app.post('/query', async (req, res) => {
       });
     }
     
-    const connection = activeConnections.get(connectionId);
-    if (!connection) {
-      console.error('❌ Connection not found:', connectionId);
+    const connectionPool = connectionPools.get(connectionId);
+    if (!connectionPool) {
+      console.error('❌ Pool not found:', connectionId);
       return res.status(404).json({
         success: false,
-        error: 'Conexão não encontrada'
+        error: 'Pool de conexões não encontrado'
       });
     }
 
-    console.log('✅ Connection found, executing operation...');
+    // ✅ Atualizar timestamp de último uso
+    connectionPool.lastUsed = new Date();
+
+    console.log('✅ Pool found, executing operation...');
     
-    const coll = connection.db.collection(collection);
+    const coll = connectionPool.db.collection(collection);
     let result;
     
     // Processar parâmetros baseado na operação
@@ -344,11 +415,16 @@ app.post('/query', async (req, res) => {
       processedQuery: JSON.stringify(processedParams.query, null, 2)
     });
     
-    // Executar operação baseada no tipo
+    // ✅ Executar operação com timeout adequado para cada tipo
+    const operationStart = Date.now();
+    
     switch (operation) {
       case 'find':
         console.log('🔍 Executando find com query:', JSON.stringify(processedParams.query));
-        result = await coll.find(processedParams.query, processedParams.options).toArray();
+        result = await coll.find(processedParams.query, {
+          ...processedParams.options,
+          maxTimeMS: 45000 // 45s timeout para finds
+        }).toArray();
         console.log('📊 Find result count:', result.length);
         
         // Log first few results for debugging
@@ -366,7 +442,10 @@ app.post('/query', async (req, res) => {
         
       case 'findOne':
         console.log('🔍 Executando findOne com query:', JSON.stringify(processedParams.query));
-        result = await coll.findOne(processedParams.query, processedParams.options);
+        result = await coll.findOne(processedParams.query, {
+          ...processedParams.options,
+          maxTimeMS: 30000 // 30s timeout para findOne
+        });
         console.log('📊 FindOne result:', result ? 'Found document' : 'No document found');
         break;
         
@@ -375,13 +454,20 @@ app.post('/query', async (req, res) => {
         if (!Array.isArray(processedParams.pipeline)) {
           throw new Error('Pipeline deve ser um array para operação aggregate');
         }
-        result = await coll.aggregate(processedParams.pipeline, processedParams.options).toArray();
+        result = await coll.aggregate(processedParams.pipeline, {
+          ...processedParams.options,
+          maxTimeMS: 90000, // 90s timeout para aggregations
+          allowDiskUse: true // Permitir uso de disco para agregações pesadas
+        }).toArray();
         console.log('📊 Aggregate result count:', result.length);
         break;
         
       case 'countDocuments':
         console.log('🔢 Executando countDocuments com query:', JSON.stringify(processedParams.query));
-        result = await coll.countDocuments(processedParams.query, processedParams.options);
+        result = await coll.countDocuments(processedParams.query, {
+          ...processedParams.options,
+          maxTimeMS: 60000 // 60s timeout para count
+        });
         console.log('📊 Count result:', result);
         break;
         
@@ -420,8 +506,13 @@ app.post('/query', async (req, res) => {
         throw new Error(`Operação não suportada: ${operation}`);
     }
     
-    const executionTime = Date.now() - startTime;
-    console.log(`✅ Query executada com sucesso em ${executionTime}ms`);
+    const executionTime = Date.now() - operationStart;
+    console.log('✅ Query executada via pool:', {
+      operation,
+      executionTime: `${executionTime}ms`,
+      resultSize: Array.isArray(result) ? result.length : typeof result
+    });
+    
     console.log('📈 Resultado:', {
       type: typeof result,
       isArray: Array.isArray(result),
@@ -449,11 +540,18 @@ app.post('/query', async (req, res) => {
     console.error('💥 Error stack:', error.stack);
     console.error('📊 Request body:', JSON.stringify(req.body, null, 2));
     
+    // ✅ Classificar tipo de erro
+    let errorType = 'unknown';
+    if (error.message.includes('timeout')) errorType = 'timeout';
+    if (error.message.includes('connection')) errorType = 'connection';
+    if (error.message.includes('authentication')) errorType = 'auth';
+    
     res.status(500).json({
       success: false,
-      error: 'Falha na execução da query',
+      error: 'Falha na execução da query via pool',
       details: error.message,
       executionTime: executionTime,
+      errorType,
       timestamp: new Date().toISOString(),
       diagnostics: {
         operation: req.body.operation,
@@ -470,40 +568,43 @@ app.post('/debug-stores', async (req, res) => {
   try {
     const { connectionId, franchiseId } = req.body;
     
-    const connection = activeConnections.get(connectionId);
-    if (!connection) {
-      return res.status(404).json({ success: false, error: 'Connection not found' });
+    const connectionPool = connectionPools.get(connectionId);
+    if (!connectionPool) {
+      return res.status(404).json({ success: false, error: 'Pool not found' });
     }
+
+    // ✅ Atualizar timestamp de último uso
+    connectionPool.lastUsed = new Date();
 
     console.log('🔍 ===== DEBUG STORES SEARCH =====');
     console.log('🆔 Franchise ID to search:', franchiseId);
 
     // Teste 1: Contar total de documentos
-    const totalCount = await connection.db.collection('stores').countDocuments({});
+    const totalCount = await connectionPool.db.collection('stores').countDocuments({});
     console.log('📊 Total stores in collection:', totalCount);
 
     // Teste 2: Buscar primeiros 5 documentos para ver estrutura
-    const sampleStores = await connection.db.collection('stores').find({}).limit(5).toArray();
+    const sampleStores = await connectionPool.db.collection('stores').find({}).limit(5).toArray();
     console.log('📋 Sample stores structure:', JSON.stringify(sampleStores, null, 2));
 
     // Teste 3: Buscar com franchise como string
     const stringQuery = { franchise: franchiseId };
-    const stringResult = await connection.db.collection('stores').find(stringQuery).limit(5).toArray();
+    const stringResult = await connectionPool.db.collection('stores').find(stringQuery).limit(5).toArray();
     console.log('🔍 String query result count:', stringResult.length);
 
     // Teste 4: Buscar com franchise como ObjectId
     const objectIdQuery = { franchise: new ObjectId(franchiseId) };
-    const objectIdResult = await connection.db.collection('stores').find(objectIdQuery).limit(5).toArray();
+    const objectIdResult = await connectionPool.db.collection('stores').find(objectIdQuery).limit(5).toArray();
     console.log('🔍 ObjectId query result count:', objectIdResult.length);
 
     // Teste 5: Buscar com franchiseId como string
     const franchiseIdStringQuery = { franchiseId: franchiseId };
-    const franchiseIdStringResult = await connection.db.collection('stores').find(franchiseIdStringQuery).limit(5).toArray();
+    const franchiseIdStringResult = await connectionPool.db.collection('stores').find(franchiseIdStringQuery).limit(5).toArray();
     console.log('🔍 FranchiseId string query result count:', franchiseIdStringResult.length);
 
     // Teste 6: Buscar com franchiseId como ObjectId
     const franchiseIdObjectQuery = { franchiseId: new ObjectId(franchiseId) };
-    const franchiseIdObjectResult = await connection.db.collection('stores').find(franchiseIdObjectQuery).limit(5).toArray();
+    const franchiseIdObjectResult = await connectionPool.db.collection('stores').find(franchiseIdObjectQuery).limit(5).toArray();
     console.log('🔍 FranchiseId ObjectId query result count:', franchiseIdObjectResult.length);
 
     res.json({
@@ -525,52 +626,61 @@ app.post('/debug-stores', async (req, res) => {
   }
 });
 
-// GET /collections/:connectionId
+// GET /collections/:connectionId - Com pool de conexões
 app.get('/collections/:connectionId', async (req, res) => {
-  console.log('📚 Solicitação de listagem de collections');
+  console.log('📚 Listagem de collections via pool');
   
   try {
     const { connectionId } = req.params;
     
-    console.log('Connection ID:', connectionId);
-    
-    const connection = activeConnections.get(connectionId);
-    if (!connection) {
+    const connectionPool = connectionPools.get(connectionId);
+    if (!connectionPool) {
       return res.status(404).json({
         success: false,
-        error: 'Conexão não encontrada'
+        error: 'Pool de conexões não encontrado'
       });
     }
     
-    const collections = await connection.db.listCollections().toArray();
+    // ✅ Atualizar timestamp de último uso
+    connectionPool.lastUsed = new Date();
+    
+    const collections = await connectionPool.db.listCollections().toArray();
     const collectionsData = [];
     
-    for (const collInfo of collections) {
-      try {
-        const coll = connection.db.collection(collInfo.name);
-        const count = await coll.countDocuments();
-        
-        collectionsData.push({
-          name: collInfo.name,
-          type: collInfo.type,
-          documentCount: count,
-          sizeBytes: 0,
-          avgDocSize: 0
-        });
-        
-      } catch (collError) {
-        collectionsData.push({
-          name: collInfo.name,
-          type: collInfo.type,
-          documentCount: 0,
-          sizeBytes: 0,
-          avgDocSize: 0,
-          error: collError.message
-        });
-      }
+    // ✅ Processar collections em paralelo (limitado) para melhor performance
+    const batchSize = 5;
+    for (let i = 0; i < collections.length; i += batchSize) {
+      const batch = collections.slice(i, i + batchSize);
+      
+      const batchPromises = batch.map(async (collInfo) => {
+        try {
+          const coll = connectionPool.db.collection(collInfo.name);
+          const count = await coll.countDocuments({}, { maxTimeMS: 30000 });
+          
+          return {
+            name: collInfo.name,
+            type: collInfo.type,
+            documentCount: count,
+            sizeBytes: 0,
+            avgDocSize: 0
+          };
+        } catch (collError) {
+          return {
+            name: collInfo.name,
+            type: collInfo.type,
+            documentCount: 0,
+            sizeBytes: 0,
+            avgDocSize: 0,
+            error: collError.message
+          };
+        }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      collectionsData.push(...batchResults);
     }
     
-    console.log('✅ Collections listadas com sucesso');
+    console.log('✅ Collections listadas via pool:', collectionsData.length);
     
     res.status(200).json({
       success: true,
@@ -579,65 +689,92 @@ app.get('/collections/:connectionId', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Erro ao listar collections:', error);
+    console.error('❌ Erro ao listar collections via pool:', error);
     res.status(500).json({
       success: false,
-      error: 'Falha ao listar collections',
+      error: 'Falha ao listar collections via pool',
       details: error.message,
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// DELETE /disconnect/:connectionId
+// ✅ DELETE /disconnect/:connectionId - Limpeza adequada do pool
 app.delete('/disconnect/:connectionId', async (req, res) => {
-  console.log('🔌 Solicitação de desconexão');
+  console.log('🔌 Desconectando pool de conexões');
   
   try {
     const { connectionId } = req.params;
     
-    console.log('Desconectando:', connectionId);
-    
-    const connection = activeConnections.get(connectionId);
-    if (!connection) {
+    const connectionPool = connectionPools.get(connectionId);
+    if (!connectionPool) {
       return res.status(404).json({
         success: false,
-        error: 'Conexão não encontrada'
+        error: 'Pool de conexões não encontrado'
       });
     }
     
-    await connection.client.close();
+    // ✅ Fechar pool adequadamente
+    console.log('🔄 Fechando pool de conexões...', connectionId);
+    await connectionPool.client.close();
     
     // Limpar certificados
-    if (connection.certFiles) {
+    if (connectionPool.certFiles) {
       try {
-        if (connection.certFiles.caFile) fs.unlinkSync(connection.certFiles.caFile);
-        if (connection.certFiles.certFile) fs.unlinkSync(connection.certFiles.certFile);
+        if (connectionPool.certFiles.caFile) fs.unlinkSync(connectionPool.certFiles.caFile);
+        if (connectionPool.certFiles.certFile) fs.unlinkSync(connectionPool.certFiles.certFile);
       } catch (cleanupError) {
         console.log('⚠️ Erro ao limpar certificados:', cleanupError.message);
       }
     }
     
-    activeConnections.delete(connectionId);
-    
-    console.log('✅ Desconexão realizada com sucesso');
+    connectionPools.delete(connectionId);
+    console.log('✅ Pool de conexões desconectado:', connectionId);
     
     res.status(200).json({
       success: true,
-      message: 'Conexão encerrada com sucesso',
+      message: 'Pool de conexões encerrado com sucesso',
       timestamp: new Date().toISOString()
     });
     
   } catch (error) {
-    console.error('❌ Erro ao desconectar:', error);
+    console.error('❌ Erro ao desconectar pool:', error);
     res.status(500).json({
       success: false,
-      error: 'Falha ao desconectar',
+      error: 'Falha ao desconectar pool',
       details: error.message,
       timestamp: new Date().toISOString()
     });
   }
 });
+
+// ✅ NOVO: Limpeza automática de pools ociosos (executada a cada 5 minutos)
+setInterval(async () => {
+  const now = Date.now();
+  const maxIdleTime = 30 * 60 * 1000; // 30 minutos
+  
+  for (const [connectionId, pool] of connectionPools.entries()) {
+    const idleTime = now - pool.lastUsed.getTime();
+    
+    if (idleTime > maxIdleTime) {
+      console.log('🧹 Limpando pool ocioso:', connectionId, 'idle:', Math.floor(idleTime / 60000), 'min');
+      
+      try {
+        await pool.client.close();
+        
+        // Limpar certificados
+        if (pool.certFiles) {
+          if (pool.certFiles.caFile) fs.unlinkSync(pool.certFiles.caFile);
+          if (pool.certFiles.certFile) fs.unlinkSync(pool.certFiles.certFile);
+        }
+        
+        connectionPools.delete(connectionId);
+      } catch (error) {
+        console.error('❌ Erro ao limpar pool ocioso:', error);
+      }
+    }
+  }
+}, 5 * 60 * 1000);
 
 // Handle 404s
 app.use('*', (req, res) => {
@@ -660,6 +797,22 @@ app.use((error, req, res, next) => {
     details: error.message,
     timestamp: new Date().toISOString()
   });
+});
+
+// ✅ Graceful shutdown - Fechar todos os pools
+process.on('SIGINT', async () => {
+  console.log('🛑 Fechando todos os pools de conexão...');
+  
+  for (const [connectionId, pool] of connectionPools.entries()) {
+    try {
+      await pool.client.close();
+      console.log('✅ Pool fechado:', connectionId);
+    } catch (error) {
+      console.error('❌ Erro ao fechar pool:', connectionId, error);
+    }
+  }
+  
+  process.exit(0);
 });
 
 // Exportar para Vercel
