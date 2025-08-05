@@ -19,52 +19,92 @@ const activeConnections = new Map();
 
 console.log('🚀 MongoDB TLS Proxy Service iniciado');
 
-// Função para converter strings para ObjectId e Date quando necessário
+// NOVA FUNÇÃO: Processar funções MongoDB em pipelines de agregação
+function processMongoPipeline(pipeline) {
+  if (!Array.isArray(pipeline)) {
+    return pipeline;
+  }
+
+  console.log('🔧 Processando pipeline MongoDB:', JSON.stringify(pipeline, null, 2));
+
+  const processedPipeline = pipeline.map(stage => {
+    return processMongoStage(stage);
+  });
+
+  console.log('✅ Pipeline processado:', JSON.stringify(processedPipeline, null, 2));
+  return processedPipeline;
+}
+
+// NOVA FUNÇÃO: Processar estágio individual do pipeline
+function processMongoStage(stage) {
+  if (typeof stage !== 'object' || stage === null) {
+    return stage;
+  }
+
+  const processed = {};
+  
+  for (const [key, value] of Object.entries(stage)) {
+    processed[key] = processMongoValue(value);
+  }
+  
+  return processed;
+}
+
+// NOVA FUNÇÃO: Processar valores com funções MongoDB
+function processMongoValue(value) {
+  if (typeof value === 'string') {
+    // Processar ISODate("...")
+    const isoDateMatch = value.match(/^ISODate\("([^"]+)"\)$/);
+    if (isoDateMatch) {
+      console.log(`🔄 Converting ISODate string to Date:`, isoDateMatch[1]);
+      return new Date(isoDateMatch[1]);
+    }
+    
+    // Processar ObjectId("...")
+    const objectIdMatch = value.match(/^ObjectId\("([a-fA-F0-9]{24})"\)$/);
+    if (objectIdMatch) {
+      console.log(`🔄 Converting ObjectId string to ObjectId:`, objectIdMatch[1]);
+      return new ObjectId(objectIdMatch[1]);
+    }
+    
+    // Detectar strings que parecem datas ISO (formato: YYYY-MM-DDTHH:mm:ss)
+    const isoDatePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$/;
+    if (isoDatePattern.test(value)) {
+      try {
+        const dateObj = new Date(value);
+        if (!isNaN(dateObj.getTime())) {
+          console.log(`🔄 Converting ISO date string to Date:`, value, '→', dateObj);
+          return dateObj;
+        }
+      } catch (err) {
+        console.log(`⚠️ Failed to convert ${value} to Date, keeping as string`);
+      }
+    }
+    
+    return value;
+  } else if (Array.isArray(value)) {
+    return value.map(item => processMongoValue(item));
+  } else if (typeof value === 'object' && value !== null) {
+    const processed = {};
+    for (const [k, v] of Object.entries(value)) {
+      processed[k] = processMongoValue(v);
+    }
+    return processed;
+  }
+  
+  return value;
+}
+
+// Função para converter strings para ObjectId e Date quando necessário - ATUALIZADA
 function parseQuery(query) {
   const parsed = { ...query };
   
-  // Função recursiva para detectar e converter datas ISO para Date objects
-  function convertDates(obj) {
-    for (const key in obj) {
-      if (obj[key] && typeof obj[key] === 'object' && !Array.isArray(obj[key]) && !(obj[key] instanceof Date) && !(obj[key] instanceof ObjectId)) {
-        // Processar objetos aninhados ($gte, $lte, $in, etc.)
-        convertDates(obj[key]);
-      } else if (typeof obj[key] === 'string') {
-        // Detectar strings que parecem datas ISO (formato: YYYY-MM-DDTHH:mm:ss)
-        const isoDatePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$/;
-        if (isoDatePattern.test(obj[key])) {
-          try {
-            const dateObj = new Date(obj[key]);
-            // Verificar se é uma data válida
-            if (!isNaN(dateObj.getTime())) {
-              console.log(`🔄 Converting date string to Date object:`, obj[key], '→', dateObj);
-              obj[key] = dateObj;
-            }
-          } catch (err) {
-            console.log(`⚠️ Failed to convert ${obj[key]} to Date, keeping as string`);
-          }
-        }
-      }
-    }
-  }
+  console.log('🔍 parseQuery - Input:', JSON.stringify(parsed, null, 2));
   
-  // Converter campos que podem ser ObjectIds
-  ['_id', 'franchise', 'franchiseId', 'store', 'storeId'].forEach(field => {
-    if (parsed[field] && typeof parsed[field] === 'string' && parsed[field].length === 24) {
-      try {
-        console.log(`🔄 Converting ${field} from string to ObjectId:`, parsed[field]);
-        parsed[field] = new ObjectId(parsed[field]);
-        console.log(`✅ Converted ${field} to ObjectId:`, parsed[field]);
-      } catch (err) {
-        console.log(`⚠️ Failed to convert ${field} to ObjectId, keeping as string`);
-      }
-    }
-  });
+  // Processar com a nova função de valores MongoDB
+  const result = processMongoValue(parsed);
   
-  // Converter strings de data para Date objects
-  convertDates(parsed);
-  
-  console.log('📝 Query após processamento:', JSON.stringify(parsed, (key, value) => {
+  console.log('📝 parseQuery - Output:', JSON.stringify(result, (key, value) => {
     if (value instanceof Date) {
       return `Date(${value.toISOString()})`;
     } else if (value instanceof ObjectId) {
@@ -73,7 +113,7 @@ function parseQuery(query) {
     return value;
   }, 2));
   
-  return parsed;
+  return result;
 }
 
 // Root endpoint
@@ -82,15 +122,15 @@ app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
     service: 'MongoDB TLS Proxy',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'running',
     timestamp: new Date().toISOString(),
     features: [
       'Complex Aggregation Pipelines',
-      'Multiple Parameter Types',
+      'MongoDB Function Processing (ISODate, ObjectId)',
       'Enhanced Error Handling',
       'Detailed Logging',
-      'ObjectId Conversion',
+      'Pipeline Value Processing',
       'Debug Endpoints'
     ],
     endpoints: {
@@ -169,26 +209,50 @@ async function createMongoConnection(config) {
   return { client, db: client.db(database) };
 }
 
-// Função para validar e processar parâmetros de query
+// Função para validar e processar parâmetros de query - ATUALIZADA
 function processQueryParameters(operation, params) {
   const { query, pipeline, filter, document, options = {} } = params;
   
-  console.log('🔍 Processando parâmetros:', { 
+  console.log('🔍 processQueryParameters - Input:', { 
     operation, 
     hasQuery: !!query, 
     hasPipeline: !!pipeline, 
     hasFilter: !!filter, 
     hasDocument: !!document,
-    optionsKeys: Object.keys(options)
+    optionsKeys: Object.keys(options),
+    pipelineType: typeof pipeline,
+    pipelineIsArray: Array.isArray(pipeline)
   });
 
   switch (operation) {
     case 'aggregate':
-      if (!pipeline && !query) {
-        throw new Error('Pipeline ou query é obrigatório para operação aggregate');
+      let processedPipeline = pipeline || query || [];
+      
+      // Se recebemos uma string que parece ser um array, tentar fazer parse
+      if (typeof processedPipeline === 'string') {
+        try {
+          processedPipeline = JSON.parse(processedPipeline);
+        } catch (e) {
+          console.error('❌ Erro ao fazer parse do pipeline string:', e.message);
+          throw new Error('Pipeline deve ser um array válido para operação aggregate');
+        }
       }
+      
+      if (!Array.isArray(processedPipeline)) {
+        throw new Error('Pipeline deve ser um array para operação aggregate');
+      }
+      
+      // NOVA FUNCIONALIDADE: Processar funções MongoDB no pipeline
+      const finalPipeline = processMongoPipeline(processedPipeline);
+      
+      console.log('✅ Pipeline processado para aggregate:', JSON.stringify(finalPipeline, (key, value) => {
+        if (value instanceof Date) return `Date(${value.toISOString()})`;
+        if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
+        return value;
+      }, 2));
+      
       return { 
-        pipeline: pipeline || query || [],
+        pipeline: finalPipeline,
         options: options || {}
       };
 
@@ -318,31 +382,18 @@ app.post('/connect', async (req, res) => {
   }
 });
 
-// POST /query - VERSÃO MELHORADA COM LOGS DETALHADOS
+// POST /query - VERSÃO ATUALIZADA COM PROCESSAMENTO APRIMORADO
 app.post('/query', async (req, res) => {
-  console.log('🔍 Solicitação de query recebida');
+  console.log('🔍 ========== NOVA SOLICITAÇÃO DE QUERY ==========');
   const startTime = Date.now();
   
   try {
     const { connectionId, collection, operation, query, pipeline, filter, document, options } = req.body;
     
-    console.log('🔍 ===== PROXY QUERY DEBUG =====');
-    console.log('📋 Full Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('📋 Request completo:', JSON.stringify(req.body, null, 2));
     console.log('🆔 ConnectionId:', connectionId);
     console.log('📊 Collection:', collection);
     console.log('⚡ Operation:', operation);
-    console.log('🔍 Raw Query:', JSON.stringify(query, null, 2));
-    console.log('📊 Query params:', { 
-      connectionId, 
-      collection, 
-      operation,
-      hasQuery: !!query,
-      hasPipeline: !!pipeline,
-      hasFilter: !!filter,
-      hasDocument: !!document,
-      queryType: typeof query,
-      pipelineLength: Array.isArray(pipeline) ? pipeline.length : 'not-array'
-    });
     
     if (!connectionId || !collection || !operation) {
       return res.status(400).json({
@@ -365,7 +416,7 @@ app.post('/query', async (req, res) => {
     const coll = connection.db.collection(collection);
     let result;
     
-    // Processar parâmetros baseado na operação
+    // Processar parâmetros com a nova função aprimorada
     const processedParams = processQueryParameters(operation, {
       query,
       pipeline,
@@ -374,69 +425,56 @@ app.post('/query', async (req, res) => {
       options
     });
 
-    console.log('⚙️ Parâmetros processados:', {
+    console.log('⚙️ Parâmetros FINAIS processados:', {
       operation,
       processedKeys: Object.keys(processedParams),
-      pipelineLength: processedParams.pipeline ? processedParams.pipeline.length : 0,
-      processedQuery: JSON.stringify(processedParams.query, (key, value) => {
-        if (value instanceof Date) {
-          return `Date(${value.toISOString()})`;
-        } else if (value instanceof ObjectId) {
-          return `ObjectId(${value.toString()})`;
-        }
-        return value;
-      }, 2)
+      pipelineLength: processedParams.pipeline ? processedParams.pipeline.length : 0
     });
     
     // Executar operação baseada no tipo
     switch (operation) {
       case 'find':
-        console.log('🔍 Executando find com query:', JSON.stringify(processedParams.query, (key, value) => {
-          if (value instanceof Date) return `Date(${value.toISOString()})`;
-          if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
-          return value;
-        }));
+        console.log('🔍 Executando find com query processada');
         result = await coll.find(processedParams.query, processedParams.options).toArray();
         console.log('📊 Find result count:', result.length);
-        
-        // Log first few results for debugging
-        if (result.length > 0) {
-          console.log('📋 First 2 results:', JSON.stringify(result.slice(0, 2), null, 2));
-        } else {
-          console.log('⚠️ Zero results found, testing with empty query...');
-          const testResult = await coll.find({}).limit(3).toArray();
-          console.log('📋 Test query (empty) returned:', testResult.length, 'documents');
-          if (testResult.length > 0) {
-            console.log('📋 Sample documents:', JSON.stringify(testResult, null, 2));
-          }
-        }
         break;
         
       case 'findOne':
-        console.log('🔍 Executando findOne com query:', JSON.stringify(processedParams.query, (key, value) => {
-          if (value instanceof Date) return `Date(${value.toISOString()})`;
-          if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
-          return value;
-        }));
+        console.log('🔍 Executando findOne com query processada');
         result = await coll.findOne(processedParams.query, processedParams.options);
         console.log('📊 FindOne result:', result ? 'Found document' : 'No document found');
         break;
         
       case 'aggregate':
-        console.log('📊 Executando aggregate com pipeline:', JSON.stringify(processedParams.pipeline, null, 2));
-        if (!Array.isArray(processedParams.pipeline)) {
-          throw new Error('Pipeline deve ser um array para operação aggregate');
-        }
-        result = await coll.aggregate(processedParams.pipeline, processedParams.options).toArray();
-        console.log('📊 Aggregate result count:', result.length);
-        break;
-        
-      case 'countDocuments':
-        console.log('🔢 Executando countDocuments com query:', JSON.stringify(processedParams.query, (key, value) => {
+        console.log('📊 Executando aggregate com pipeline PROCESSADO');
+        console.log('🔧 Pipeline final:', JSON.stringify(processedParams.pipeline, (key, value) => {
           if (value instanceof Date) return `Date(${value.toISOString()})`;
           if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
           return value;
-        }));
+        }, 2));
+        
+        result = await coll.aggregate(processedParams.pipeline, processedParams.options).toArray();
+        console.log('📊 Aggregate result count:', result.length);
+        
+        // Log detalhado para debug da sua query específica
+        if (result.length > 0) {
+          console.log('📋 Primeiros resultados da agregação:', JSON.stringify(result.slice(0, 2), null, 2));
+        } else {
+          console.log('⚠️ Nenhum resultado na agregação - verificando dados...');
+          
+          // Debug: verificar se existem documentos na collection
+          const totalDocs = await coll.countDocuments({});
+          console.log('📊 Total de documentos na collection:', totalDocs);
+          
+          if (totalDocs > 0) {
+            const sampleDoc = await coll.findOne({});
+            console.log('📋 Documento de exemplo:', JSON.stringify(sampleDoc, null, 2));
+          }
+        }
+        break;
+        
+      case 'countDocuments':
+        console.log('🔢 Executando countDocuments com query processada');
         result = await coll.countDocuments(processedParams.query, processedParams.options);
         console.log('📊 Count result:', result);
         break;
@@ -477,8 +515,8 @@ app.post('/query', async (req, res) => {
     }
     
     const executionTime = Date.now() - startTime;
-    console.log(`✅ Query executada com sucesso em ${executionTime}ms`);
-    console.log('📈 Resultado:', {
+    console.log(`✅ Query executada com SUCESSO em ${executionTime}ms`);
+    console.log('📈 Resultado final:', {
       type: typeof result,
       isArray: Array.isArray(result),
       length: Array.isArray(result) ? result.length : 'not-array',
@@ -495,15 +533,16 @@ app.post('/query', async (req, res) => {
         collection,
         parametersUsed: Object.keys(processedParams),
         resultType: typeof result,
-        resultLength: Array.isArray(result) ? result.length : (result ? 1 : 0)
+        resultLength: Array.isArray(result) ? result.length : (result ? 1 : 0),
+        pipelineProcessed: operation === 'aggregate' ? 'yes' : 'no'
       }
     });
     
   } catch (error) {
     const executionTime = Date.now() - startTime;
-    console.error('💥 PROXY ERROR:', error);
-    console.error('💥 Error stack:', error.stack);
-    console.error('📊 Request body:', JSON.stringify(req.body, null, 2));
+    console.error('💥 ERRO CRÍTICO NA QUERY:', error);
+    console.error('💥 Error stack completo:', error.stack);
+    console.error('📊 Request body que causou erro:', JSON.stringify(req.body, null, 2));
     
     res.status(500).json({
       success: false,
@@ -570,7 +609,7 @@ app.post('/debug-stores', async (req, res) => {
         stringQueryCount: stringResult.length,
         objectIdQueryCount: objectIdResult.length,
         franchiseIdStringCount: franchiseIdStringResult.length,
-        franchiseIdObjectCount: franchiseIdObjectResult.length,
+        franchiseIdObjectCount: objectIdObjectResult.length,
         firstSample: sampleStores[0] || null
       }
     });
