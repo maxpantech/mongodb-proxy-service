@@ -1,3 +1,4 @@
+
 const express = require('express');
 const { MongoClient, ObjectId } = require('mongodb');
 const cors = require('cors');
@@ -17,68 +18,21 @@ app.use(express.json({ limit: '10mb' }));
 // Armazenar conexões ativas
 const activeConnections = new Map();
 
-console.log('🚀 MongoDB TLS Proxy Service iniciado');
+console.log('🚀 MongoDB Transparent Proxy Service iniciado');
 
-// FUNÇÃO CORRIGIDA: Processar funções MongoDB em pipelines de agregação
-function processMongoPipeline(pipeline) {
-  if (!Array.isArray(pipeline)) {
-    return pipeline;
-  }
-
-  console.log('🔧 Processando pipeline MongoDB:', JSON.stringify(pipeline, null, 2));
-
-  const processedPipeline = pipeline.map(stage => {
-    return processMongoStage(stage);
-  });
-
-  console.log('✅ Pipeline processado:', JSON.stringify(processedPipeline, null, 2));
-  return processedPipeline;
-}
-
-// FUNÇÃO CORRIGIDA: Processar estágio individual do pipeline
-function processMongoStage(stage) {
-  if (typeof stage !== 'object' || stage === null) {
-    return stage;
-  }
-
-  const processed = {};
-  
-  for (const [key, value] of Object.entries(stage)) {
-    processed[key] = processMongoValue(value);
-  }
-  
-  return processed;
-}
-
-// FUNÇÃO CORRIGIDA: Processar valores com funções MongoDB
+// FUNÇÃO SIMPLIFICADA: Processar apenas ObjectId e ISODate
 function processMongoValue(value) {
   if (typeof value === 'string') {
-    // Processar ISODate("...")
-    const isoDateMatch = value.match(/^ISODate\("([^"]+)"\)$/);
-    if (isoDateMatch) {
-      console.log(`🔄 Converting ISODate string to Date:`, isoDateMatch[1]);
-      return new Date(isoDateMatch[1]);
-    }
-    
     // Processar ObjectId("...")
     const objectIdMatch = value.match(/^ObjectId\("([a-fA-F0-9]{24})"\)$/);
     if (objectIdMatch) {
-      console.log(`🔄 Converting ObjectId string to ObjectId:`, objectIdMatch[1]);
       return new ObjectId(objectIdMatch[1]);
     }
     
-    // Detectar strings que parecem datas ISO (formato: YYYY-MM-DDTHH:mm:ss)
-    const isoDatePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$/;
-    if (isoDatePattern.test(value)) {
-      try {
-        const dateObj = new Date(value);
-        if (!isNaN(dateObj.getTime())) {
-          console.log(`🔄 Converting ISO date string to Date:`, value, '→', dateObj);
-          return dateObj;
-        }
-      } catch (err) {
-        console.log(`⚠️ Failed to convert ${value} to Date, keeping as string`);
-      }
+    // Processar ISODate("...")
+    const isoDateMatch = value.match(/^ISODate\("([^"]+)"\)$/);
+    if (isoDateMatch) {
+      return new Date(isoDateMatch[1]);
     }
     
     return value;
@@ -95,161 +49,49 @@ function processMongoValue(value) {
   return value;
 }
 
-// FUNÇÃO TOTALMENTE REESCRITA: Processar rawQuery corretamente
+// FUNÇÃO TRANSPARENTE: Processar rawQuery sem alterar lógica
 function parseRawQuery(rawQuery) {
   if (!rawQuery || typeof rawQuery !== 'string') {
-    console.log('🔍 parseRawQuery - No rawQuery provided, returning {}');
     return {};
   }
-
-  console.log('🔍 parseRawQuery - Input rawQuery:', rawQuery);
 
   try {
-    // Primeiro, processar ObjectId("...") diretamente
-    let processedQuery = rawQuery.trim();
-    
-    // Regex para encontrar ObjectId("24-char-hex")
-    const objectIdRegex = /ObjectId\("([a-fA-F0-9]{24})"\)/g;
-    const objectIdMatches = [];
-    let match;
-    
-    // Coletar todos os ObjectIds
-    while ((match = objectIdRegex.exec(rawQuery)) !== null) {
-      objectIdMatches.push({
-        full: match[0],
-        id: match[1],
-        placeholder: `__OBJECTID_${objectIdMatches.length}__`
-      });
-    }
-    
-    console.log('🔍 ObjectIds encontrados:', objectIdMatches);
-    
-    // Substituir ObjectIds por placeholders
-    objectIdMatches.forEach((objId) => {
-      processedQuery = processedQuery.replace(objId.full, `"${objId.placeholder}"`);
-    });
-    
-    console.log('🔍 Query após substituição de ObjectIds:', processedQuery);
-    
-    // Fazer parse JSON
-    let parsedQuery;
-    try {
-      parsedQuery = JSON.parse(processedQuery);
-    } catch (parseError) {
-      console.error('❌ Erro no JSON.parse:', parseError.message);
-      console.error('❌ String que falhou:', processedQuery);
-      return {};
-    }
-    
-    // Substituir placeholders pelos ObjectIds reais
-    function replaceObjectIdPlaceholders(obj) {
-      if (Array.isArray(obj)) {
-        return obj.map(replaceObjectIdPlaceholders);
-      } else if (typeof obj === 'object' && obj !== null) {
-        const result = {};
-        for (const [key, value] of Object.entries(obj)) {
-          if (typeof value === 'string') {
-            const objectIdMatch = objectIdMatches.find(objId => objId.placeholder === value);
-            if (objectIdMatch) {
-              console.log(`🔄 Substituindo placeholder ${value} por ObjectId(${objectIdMatch.id})`);
-              result[key] = new ObjectId(objectIdMatch.id);
-            } else {
-              result[key] = value;
-            }
-          } else {
-            result[key] = replaceObjectIdPlaceholders(value);
-          }
-        }
-        return result;
-      }
-      return obj;
-    }
-
-    const finalQuery = replaceObjectIdPlaceholders(parsedQuery);
-    
-    console.log('✅ parseRawQuery - Query final processada:', JSON.stringify(finalQuery, (key, value) => {
-      if (value instanceof ObjectId) {
-        return `ObjectId(${value.toString()})`;
-      }
-      return value;
-    }, 2));
-
-    return finalQuery;
-
+    // Parse direto do JSON, processando apenas ObjectId e ISODate
+    const parsed = JSON.parse(rawQuery);
+    return processMongoValue(parsed);
   } catch (error) {
-    console.error('❌ Erro crítico em parseRawQuery:', error);
-    console.error('❌ rawQuery que causou erro:', rawQuery);
+    console.error('❌ Erro ao fazer parse da rawQuery:', error);
     return {};
   }
-}
-
-// FUNÇÃO CORRIGIDA: Converter strings para ObjectId e Date quando necessário
-function parseQuery(query) {
-  console.log('🔍 parseQuery - Input:', JSON.stringify(query, null, 2));
-  
-  // Processar com a nova função de valores MongoDB
-  const result = processMongoValue(query);
-  
-  console.log('📝 parseQuery - Output:', JSON.stringify(result, (key, value) => {
-    if (value instanceof Date) {
-      return `Date(${value.toISOString()})`;
-    } else if (value instanceof ObjectId) {
-      return `ObjectId(${value.toString()})`;
-    }
-    return value;
-  }, 2));
-  
-  return result;
 }
 
 // Root endpoint
 app.get('/', (req, res) => {
-  console.log('🏠 Root endpoint acessado em:', new Date().toISOString());
   res.status(200).json({
     success: true,
-    service: 'MongoDB TLS Proxy',
-    version: '2.2.0',
+    service: 'MongoDB Transparent Proxy',
+    version: '3.0.0',
     status: 'running',
     timestamp: new Date().toISOString(),
-    features: [
-      'Complex Aggregation Pipelines',
-      'MongoDB Function Processing (ISODate, ObjectId)',
-      'Enhanced Error Handling',
-      'Detailed Logging',
-      'Pipeline Value Processing',
-      'Debug Endpoints',
-      'Fixed ObjectId Processing'
-    ],
-    endpoints: {
-      health: '/health',
-      status: '/status',
-      connect: 'POST /connect',
-      query: 'POST /query',
-      collections: 'GET /collections/:connectionId',
-      disconnect: 'DELETE /disconnect/:connectionId',
-      debugStores: 'POST /debug-stores'
-    }
+    description: 'Pure communication layer - no business logic'
   });
 });
 
 // Health check
 app.get('/health', (req, res) => {
-  console.log('❤️ Health check acessado');
   res.status(200).json({ 
     status: 'ok', 
-    service: 'mongodb-tls-proxy',
+    service: 'mongodb-transparent-proxy',
     timestamp: new Date().toISOString() 
   });
 });
 
 // Status endpoint
 app.get('/status', (req, res) => {
-  console.log('📊 Status endpoint acessado');
   res.status(200).json({
     success: true,
     activeConnections: activeConnections.size,
     uptime: process.uptime(),
-    memory: process.memoryUsage(),
     timestamp: new Date().toISOString()
   });
 });
@@ -258,7 +100,7 @@ app.get('/status', (req, res) => {
 async function createMongoConnection(config) {
   const { mongoUrl, database, tlsConfig } = config;
   
-  console.log('🔗 Criando conexão MongoDB TLS...', { database, tlsEnabled: tlsConfig?.enabled });
+  console.log('🔗 Criando conexão MongoDB...', { database, tlsEnabled: tlsConfig?.enabled });
   
   const options = {
     connectTimeoutMS: 30000,
@@ -271,24 +113,13 @@ async function createMongoConnection(config) {
     options.tlsAllowInvalidHostnames = tlsConfig.insecure || false;
     
     if (tlsConfig.caFile) {
-      console.log('📜 Aplicando certificado CA:', tlsConfig.caFile);
       options.tlsCAFile = tlsConfig.caFile;
     }
     if (tlsConfig.certFile) {
-      console.log('🔑 Aplicando certificado cliente:', tlsConfig.certFile);
       options.tlsCertificateKeyFile = tlsConfig.certFile;
     }
-    
-    console.log('🔒 Configurações TLS aplicadas:', {
-      tls: options.tls,
-      tlsAllowInvalidCertificates: options.tlsAllowInvalidCertificates,
-      tlsAllowInvalidHostnames: options.tlsAllowInvalidHostnames,
-      hasCaFile: !!options.tlsCAFile,
-      hasCertFile: !!options.tlsCertificateKeyFile
-    });
   }
 
-  console.log('🔌 Tentando conectar com MongoDB...');
   const client = new MongoClient(mongoUrl, options);
   await client.connect();
   console.log('✅ MongoDB conectado com sucesso!');
@@ -296,114 +127,10 @@ async function createMongoConnection(config) {
   return { client, db: client.db(database) };
 }
 
-// FUNÇÃO TOTALMENTE REESCRITA: Validar e processar parâmetros de query
-function processQueryParameters(operation, params) {
-  const { query, pipeline, filter, document, options = {}, rawQuery } = params;
-  
-  console.log('🔍 === PROCESSAMENTO DE PARÂMETROS INÍCIO ===');
-  console.log('Operação:', operation);
-  console.log('Parâmetros recebidos:', {
-    hasQuery: !!query,
-    hasPipeline: !!pipeline,
-    hasFilter: !!filter,
-    hasDocument: !!document,
-    hasRawQuery: !!rawQuery,
-    optionsKeys: Object.keys(options),
-    rawQueryContent: rawQuery
-  });
-
-  let processedQuery = {};
-  let processedOptions = { ...options };
-
-  // PRIORIDADE 1: Se há rawQuery, usar ele
-  if (rawQuery) {
-    console.log('🎯 PRIORIDADE: Usando rawQuery');
-    processedQuery = parseRawQuery(rawQuery);
-  } else if (query) {
-    console.log('🎯 ALTERNATIVA: Usando query normal');
-    processedQuery = parseQuery(query);
-  } else if (filter) {
-    console.log('🎯 FALLBACK: Usando filter');
-    processedQuery = parseQuery(filter);
-  }
-
-  console.log('🔍 Query processada final:', JSON.stringify(processedQuery, (key, value) => {
-    if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
-    if (value instanceof Date) return `Date(${value.toISOString()})`;
-    return value;
-  }, 2));
-
-  console.log('🔍 Options final:', processedOptions);
-  console.log('🔍 === PROCESSAMENTO DE PARÂMETROS FIM ===');
-
-  switch (operation) {
-    case 'aggregate':
-      let processedPipeline = pipeline || query || [];
-      
-      if (typeof processedPipeline === 'string') {
-        try {
-          processedPipeline = JSON.parse(processedPipeline);
-        } catch (e) {
-          console.error('❌ Erro ao fazer parse do pipeline string:', e.message);
-          throw new Error('Pipeline deve ser um array válido para operação aggregate');
-        }
-      }
-      
-      if (!Array.isArray(processedPipeline)) {
-        throw new Error('Pipeline deve ser um array para operação aggregate');
-      }
-      
-      const finalPipeline = processMongoPipeline(processedPipeline);
-      
-      return { 
-        pipeline: finalPipeline,
-        options: processedOptions
-      };
-
-    case 'find':
-    case 'findOne':
-    case 'countDocuments':
-      return {
-        query: processedQuery,
-        options: processedOptions
-      };
-
-    case 'insertOne':
-    case 'insertMany':
-      return {
-        document: document || processedQuery,
-        options: processedOptions
-      };
-
-    case 'updateOne':
-    case 'updateMany':
-    case 'deleteOne':
-    case 'deleteMany':
-      return {
-        filter: processedQuery,
-        document: document,
-        options: processedOptions
-      };
-
-    default:
-      return {
-        query: processedQuery,
-        pipeline: pipeline,
-        filter: processedQuery,
-        document: document,
-        options: processedOptions
-      };
-  }
-}
-
 // POST /connect
 app.post('/connect', async (req, res) => {
-  console.log('📥 Solicitação de conexão recebida');
-  
   try {
     const { connectionId, mongoUrl, database, tlsConfig } = req.body;
-    
-    console.log('Dados da conexão:', { connectionId, database, tlsEnabled: tlsConfig?.enabled });
     
     if (!connectionId || !mongoUrl || !database) {
       return res.status(400).json({
@@ -419,20 +146,16 @@ app.post('/connect', async (req, res) => {
       
       if (tlsConfig.caCert) {
         const caFile = path.join(tempDir, `ca_${connectionId}.pem`);
-        console.log('💾 Salvando certificado CA em:', caFile);
         fs.writeFileSync(caFile, tlsConfig.caCert);
         certFiles = { caFile };
       }
       
       if (tlsConfig.clientCert) {
         const certFile = path.join(tempDir, `cert_${connectionId}.pem`);
-        console.log('💾 Salvando certificado cliente em:', certFile);
         fs.writeFileSync(certFile, tlsConfig.clientCert);
         if (!certFiles) certFiles = {};
         certFiles.certFile = certFile;
       }
-      
-      console.log('📁 Certificados salvos:', certFiles);
     }
     
     const config = {
@@ -446,13 +169,6 @@ app.post('/connect', async (req, res) => {
       } : { enabled: false }
     };
     
-    console.log('⚙️ Configuração final:', {
-      database: config.database,
-      tlsEnabled: config.tlsConfig.enabled,
-      hasCaFile: !!config.tlsConfig.caFile,
-      hasCertFile: !!config.tlsConfig.certFile
-    });
-    
     const connection = await createMongoConnection(config);
     activeConnections.set(connectionId, {
       ...connection,
@@ -462,48 +178,39 @@ app.post('/connect', async (req, res) => {
     });
     
     // Testar conexão
-    console.log('🏓 Testando conexão com ping...');
     await connection.db.admin().ping();
-    console.log('🎯 Ping bem-sucedido');
     
     res.status(200).json({
       success: true,
-      message: 'Conexão TLS estabelecida com sucesso',
+      message: 'Conexão estabelecida com sucesso',
       connectionId,
       timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     console.error('❌ Erro na conexão:', error);
-    console.error('Stack trace:', error.stack);
     res.status(500).json({
       success: false,
-      error: 'Falha na conexão TLS',
+      error: 'Falha na conexão',
       details: error.message,
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// POST /query - VERSÃO TOTALMENTE CORRIGIDA
+// POST /query - PROXY TRANSPARENTE
 app.post('/query', async (req, res) => {
-  console.log('🔍 ========== NOVA SOLICITAÇÃO DE QUERY ==========');
   const startTime = Date.now();
   
   try {
     const { connectionId, collection, operation, query, pipeline, filter, document, options, rawQuery } = req.body;
     
-    console.log('📋 === REQUEST COMPLETO ===');
+    console.log('🔍 ========== PROXY TRANSPARENTE ==========');
     console.log('ConnectionId:', connectionId);
     console.log('Collection:', collection);
     console.log('Operation:', operation);
-    console.log('Query:', query);
-    console.log('Pipeline:', pipeline);
-    console.log('Filter:', filter);
-    console.log('Document:', document);
-    console.log('Options:', options);
     console.log('RawQuery:', rawQuery);
-    console.log('========================');
+    console.log('Options:', options);
     
     if (!connectionId || !collection || !operation) {
       return res.status(400).json({
@@ -514,246 +221,124 @@ app.post('/query', async (req, res) => {
     
     const connection = activeConnections.get(connectionId);
     if (!connection) {
-      console.error('❌ Connection not found:', connectionId);
       return res.status(404).json({
         success: false,
         error: 'Conexão não encontrada'
       });
     }
 
-    console.log('✅ Connection found, executing operation...');
-    
     const coll = connection.db.collection(collection);
     let result;
     
-    // PROCESSAR parâmetros com nova função corrigida
-    const processedParams = processQueryParameters(operation, {
-      query,
-      pipeline,
-      filter,
-      document,
-      options,
-      rawQuery
-    });
-
-    console.log('⚙️ === PARÂMETROS FINAIS PROCESSADOS ===');
-    console.log('Operation:', operation);
-    console.log('Processed keys:', Object.keys(processedParams));
-    console.log('Query final:', JSON.stringify(processedParams.query, (key, value) => {
-      if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
-      if (value instanceof Date) return `Date(${value.toISOString()})`;
-      return value;
-    }, 2));
-    console.log('Options final:', processedParams.options);
-    console.log('=====================================');
-    
-    // Executar operação baseada no tipo
+    // EXECUÇÃO TRANSPARENTE: Usar exatamente os parâmetros recebidos
     switch (operation) {
       case 'find':
-        console.log('🔍 === EXECUTANDO FIND ===');
-        console.log('Query MongoDB nativa:', JSON.stringify(processedParams.query, (key, value) => {
-          if (value instanceof ObjectId) return `ObjectId(${value.toString()})`;
-          return value;
-        }, 2));
-        console.log('Options MongoDB nativas:', processedParams.options);
+        const findQuery = rawQuery ? parseRawQuery(rawQuery) : (query || filter || {});
+        const findOptions = options || {};
         
-        result = await coll.find(processedParams.query, processedParams.options).toArray();
-        console.log('📊 Find executado - documentos retornados:', result.length);
+        console.log('📋 EXECUTANDO FIND:');
+        console.log('  Query:', JSON.stringify(findQuery, null, 2));
+        console.log('  Options:', JSON.stringify(findOptions, null, 2));
         
-        // VERIFICAÇÃO CRÍTICA: Validar se o filtro foi aplicado
-        if (result.length > 0) {
-          const firstDoc = result[0];
-          console.log('📋 Primeiro documento retornado:', {
-            _id: firstDoc._id?.toString(),
-            franchiseId: firstDoc.franchiseId?.toString(),
-            franchise: firstDoc.franchise?.toString(),
-            fullName: firstDoc.fullName
-          });
-          
-          // Se a query tinha franchiseId, verificar se foi respeitado
-          if (processedParams.query.franchiseId) {
-            const expectedFranchiseId = processedParams.query.franchiseId.toString();
-            const actualFranchiseId = firstDoc.franchiseId?.toString();
-            
-            if (actualFranchiseId !== expectedFranchiseId) {
-              console.error('🚨 FILTRO DE FRANQUIA NÃO APLICADO!');
-              console.error('Esperado:', expectedFranchiseId);
-              console.error('Recebido:', actualFranchiseId);
-            } else {
-              console.log('✅ Filtro de franquia aplicado corretamente');
-            }
-          }
+        let cursor = coll.find(findQuery, findOptions);
+        
+        // Aplicar limit se especificado nas options
+        if (findOptions.limit) {
+          cursor = cursor.limit(findOptions.limit);
         }
+        
+        result = await cursor.toArray();
+        
+        console.log('✅ RESULTADO FIND:', result.length, 'documentos');
         break;
         
       case 'findOne':
-        console.log('🔍 Executando findOne com query processada');
-        result = await coll.findOne(processedParams.query, processedParams.options);
-        console.log('📊 FindOne result:', result ? 'Found document' : 'No document found');
+        const findOneQuery = rawQuery ? parseRawQuery(rawQuery) : (query || filter || {});
+        result = await coll.findOne(findOneQuery, options || {});
         break;
         
       case 'aggregate':
-        console.log('📊 Executando aggregate com pipeline PROCESSADO');
-        result = await coll.aggregate(processedParams.pipeline, processedParams.options).toArray();
-        console.log('📊 Aggregate result count:', result.length);
+        let aggregatePipeline = pipeline || query || [];
+        
+        if (typeof aggregatePipeline === 'string') {
+          aggregatePipeline = JSON.parse(aggregatePipeline);
+        }
+        
+        // Processar pipeline para ObjectId/ISODate
+        const processedPipeline = aggregatePipeline.map(stage => processMongoValue(stage));
+        
+        console.log('📋 EXECUTANDO AGGREGATE:');
+        console.log('  Pipeline:', JSON.stringify(processedPipeline, null, 2));
+        
+        result = await coll.aggregate(processedPipeline, options || {}).toArray();
+        
+        console.log('✅ RESULTADO AGGREGATE:', result.length, 'documentos');
         break;
         
       case 'countDocuments':
-        console.log('🔢 Executando countDocuments com query processada');
-        result = await coll.countDocuments(processedParams.query, processedParams.options);
-        console.log('📊 Count result:', result);
+        const countQuery = rawQuery ? parseRawQuery(rawQuery) : (query || filter || {});
+        result = await coll.countDocuments(countQuery, options || {});
         break;
         
       case 'insertOne':
-        console.log('📝 Executando insertOne');
-        result = await coll.insertOne(processedParams.document, processedParams.options);
+        result = await coll.insertOne(document || query, options || {});
         break;
         
       case 'insertMany':
-        console.log('📝 Executando insertMany');
-        result = await coll.insertMany(processedParams.document, processedParams.options);
+        result = await coll.insertMany(document || query, options || {});
         break;
         
       case 'updateOne':
-        console.log('✏️ Executando updateOne');
-        result = await coll.updateOne(processedParams.filter, processedParams.document, processedParams.options);
+        result = await coll.updateOne(filter || query || {}, document, options || {});
         break;
         
       case 'updateMany':
-        console.log('✏️ Executando updateMany');
-        result = await coll.updateMany(processedParams.filter, processedParams.document, processedParams.options);
+        result = await coll.updateMany(filter || query || {}, document, options || {});
         break;
         
       case 'deleteOne':
-        console.log('🗑️ Executando deleteOne');
-        result = await coll.deleteOne(processedParams.filter, processedParams.options);
+        result = await coll.deleteOne(filter || query || {}, options || {});
         break;
         
       case 'deleteMany':
-        console.log('🗑️ Executando deleteMany');
-        result = await coll.deleteMany(processedParams.filter, processedParams.options);
+        result = await coll.deleteMany(filter || query || {}, options || {});
         break;
         
       default:
-        console.error('❌ Unsupported operation:', operation);
         throw new Error(`Operação não suportada: ${operation}`);
     }
     
     const executionTime = Date.now() - startTime;
-    console.log(`✅ === QUERY EXECUTADA COM SUCESSO ===`);
-    console.log(`Tempo de execução: ${executionTime}ms`);
-    console.log('Tipo do resultado:', typeof result);
-    console.log('É array:', Array.isArray(result));
-    console.log('Length:', Array.isArray(result) ? result.length : 'not-array');
-    console.log('=======================================');
+    
+    console.log('✅ QUERY EXECUTADA TRANSPARENTEMENTE');
+    console.log('  Tempo:', executionTime + 'ms');
+    console.log('  Resultado:', typeof result, Array.isArray(result) ? result.length + ' items' : 'single item');
     
     res.status(200).json({
       success: true,
       data: result,
       executionTime: executionTime,
-      timestamp: new Date().toISOString(),
-      diagnostics: {
-        operation,
-        collection,
-        parametersUsed: Object.keys(processedParams),
-        resultType: typeof result,
-        resultLength: Array.isArray(result) ? result.length : (result ? 1 : 0),
-        queryProcessed: 'rawQuery-priority-fixed',
-        hasRawQuery: !!rawQuery,
-        rawQueryContent: rawQuery
-      }
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     const executionTime = Date.now() - startTime;
-    console.error('💥 ERRO CRÍTICO NA QUERY:', error);
-    console.error('💥 Error stack completo:', error.stack);
-    console.error('📊 Request body que causou erro:', JSON.stringify(req.body, null, 2));
+    console.error('💥 ERRO NO PROXY TRANSPARENTE:', error);
     
     res.status(500).json({
       success: false,
       error: 'Falha na execução da query',
       details: error.message,
       executionTime: executionTime,
-      timestamp: new Date().toISOString(),
-      diagnostics: {
-        operation: req.body.operation,
-        collection: req.body.collection,
-        errorType: error.name,
-        errorStack: error.stack
-      }
+      timestamp: new Date().toISOString()
     });
-  }
-});
-
-// POST /debug-stores - ENDPOINT PARA DEBUG ESPECÍFICO
-app.post('/debug-stores', async (req, res) => {
-  try {
-    const { connectionId, franchiseId } = req.body;
-    
-    const connection = activeConnections.get(connectionId);
-    if (!connection) {
-      return res.status(404).json({ success: false, error: 'Connection not found' });
-    }
-
-    console.log('🔍 ===== DEBUG STORES SEARCH =====');
-    console.log('🆔 Franchise ID to search:', franchiseId);
-
-    // Teste 1: Contar total de documentos
-    const totalCount = await connection.db.collection('stores').countDocuments({});
-    console.log('📊 Total stores in collection:', totalCount);
-
-    // Teste 2: Buscar primeiros 5 documentos para ver estrutura
-    const sampleStores = await connection.db.collection('stores').find({}).limit(5).toArray();
-    console.log('📋 Sample stores structure:', JSON.stringify(sampleStores, null, 2));
-
-    // Teste 3: Buscar com franchise como string
-    const stringQuery = { franchise: franchiseId };
-    const stringResult = await connection.db.collection('stores').find(stringQuery).limit(5).toArray();
-    console.log('🔍 String query result count:', stringResult.length);
-
-    // Teste 4: Buscar com franchise como ObjectId
-    const objectIdQuery = { franchise: new ObjectId(franchiseId) };
-    const objectIdResult = await connection.db.collection('stores').find(objectIdQuery).limit(5).toArray();
-    console.log('🔍 ObjectId query result count:', objectIdResult.length);
-
-    // Teste 5: Buscar com franchiseId como string
-    const franchiseIdStringQuery = { franchiseId: franchiseId };
-    const franchiseIdStringResult = await connection.db.collection('stores').find(franchiseIdStringQuery).limit(5).toArray();
-    console.log('🔍 FranchiseId string query result count:', franchiseIdStringResult.length);
-
-    // Teste 6: Buscar com franchiseId como ObjectId
-    const franchiseIdObjectQuery = { franchiseId: new ObjectId(franchiseId) };
-    const franchiseIdObjectResult = await connection.db.collection('stores').find(franchiseIdObjectQuery).limit(5).toArray();
-    console.log('🔍 FranchiseId ObjectId query result count:', franchiseIdObjectResult.length);
-
-    res.json({
-      success: true,
-      debug: {
-        totalCount,
-        sampleStores: sampleStores.length,
-        stringQueryCount: stringResult.length,
-        objectIdQueryCount: objectIdResult.length,
-        franchiseIdStringCount: franchiseIdStringResult.length,
-        franchiseIdObjectCount: objectIdObjectResult.length,
-        firstSample: sampleStores[0] || null
-      }
-    });
-
-  } catch (error) {
-    console.error('💥 Debug error:', error);
-    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // GET /collections/:connectionId
 app.get('/collections/:connectionId', async (req, res) => {
-  console.log('📚 Solicitação de listagem de collections');
-  
   try {
     const { connectionId } = req.params;
-    
-    console.log('Connection ID:', connectionId);
     
     const connection = activeConnections.get(connectionId);
     if (!connection) {
@@ -791,8 +376,6 @@ app.get('/collections/:connectionId', async (req, res) => {
       }
     }
     
-    console.log('✅ Collections listadas com sucesso');
-    
     res.status(200).json({
       success: true,
       collections: collectionsData,
@@ -812,12 +395,8 @@ app.get('/collections/:connectionId', async (req, res) => {
 
 // DELETE /disconnect/:connectionId
 app.delete('/disconnect/:connectionId', async (req, res) => {
-  console.log('🔌 Solicitação de desconexão');
-  
   try {
     const { connectionId } = req.params;
-    
-    console.log('Desconectando:', connectionId);
     
     const connection = activeConnections.get(connectionId);
     if (!connection) {
@@ -841,8 +420,6 @@ app.delete('/disconnect/:connectionId', async (req, res) => {
     
     activeConnections.delete(connectionId);
     
-    console.log('✅ Desconexão realizada com sucesso');
-    
     res.status(200).json({
       success: true,
       message: 'Conexão encerrada com sucesso',
@@ -862,7 +439,6 @@ app.delete('/disconnect/:connectionId', async (req, res) => {
 
 // Handle 404s
 app.use('*', (req, res) => {
-  console.log('🔍 404 - Rota não encontrada:', req.method, req.originalUrl);
   res.status(404).json({
     success: false,
     error: 'Rota não encontrada',
